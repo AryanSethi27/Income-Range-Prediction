@@ -1,88 +1,152 @@
-import numpy as np
-import pickle
-import streamlit as st
 import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler
 from imblearn.over_sampling import SMOTE
+import pickle
 
-from PIL import Image
+rawdata = pd.read_csv('income_train.csv')
+
+rawdata = rawdata.drop(['signature_id', 'capital-gain', 'capital-loss'], axis=1)
+
+rawdata.replace('?', np.nan, inplace=True)
+for column in rawdata.columns:
+    if rawdata[column].isnull().sum() > 0:
+        if rawdata[column].dtype == 'object':
+            mode = rawdata[column].mode()[0]
+            rawdata[column].fillna(mode, inplace=True)
+        else:
+            mean = rawdata[column].mean()
+            rawdata[column].fillna(mean, inplace=True)
+
+rawdata.to_csv('updated_dataset.csv', index=False)
 
 data = pd.read_csv('updated_dataset.csv')
 
-# Separate the features and target variable
-X = data.drop('income', axis=1)
-y = data['income']
+# Biases Analysis - Race
+race_counts = data['race'].value_counts()
+race_percentages = race_counts / len(data) * 100
+print("Race Distribution:")
+print(race_percentages)
+
+# Biases Analysis - Gender
+gender_counts = data['gender'].value_counts()
+gender_percentages = gender_counts / len(data) * 100
+print("\nGender Distribution:")
+print(gender_percentages)
+
+# Replace letters with NaN and then Average
+data['educational-num'] = pd.to_numeric(
+    data['educational-num'], errors='coerce')
+
+average = data['educational-num'].mean()
+round_avg = round(average)
+
+data['educational-num'].fillna(int(round_avg), inplace=True)
+
+data.to_csv('updated_dataset.csv', index=False)
+
+data_updt = pd.read_csv('updated_dataset.csv')
+
+threshold = 0.1
+total_count = len(data_updt)
+count_threshold = total_count * threshold
+country_distribution = data_updt['native-country'].value_counts() / total_count
+rare_categories = country_distribution[country_distribution < threshold].index.tolist()
+data_updt['native-country'] = data_updt['native-country'].apply(lambda x: 'Other' if x in rare_categories else x)
+
+data_updt.to_csv('updated_dataset.csv', index=False)
 
 label_encoder = LabelEncoder()
-X_encoded = X.apply(label_encoder.fit_transform)
 
-# Split the dataset into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(X_encoded, y, test_size=0.2, random_state=42)
+mappings = {}
+
+for column in data_updt.columns:
+    if data_updt[column].dtype == 'object':
+        value_counts = data_updt[column].value_counts()
+        sorted_values = value_counts.index.tolist()
+        encoded_values = label_encoder.fit_transform(sorted_values)
+        
+        # Create the mapping dictionary with keys in descending order of frequencies and values in ascending order
+        mapping = dict(zip(sorted_values, range(len(sorted_values))))
+        
+        data_updt[column] = data_updt[column].map(mapping)
+        mappings[column] = mapping
+
+data_updt.to_csv('encoded_dataset.csv', index=False)
+
+df = pd.read_csv('encoded_dataset.csv')
+
+X = df.drop(['income', 'race'], axis=1)
+y = df['income']
+
+# Compute weights based on 'fnlwgt'
+weights_fnlwgt = X['fnlwgt'] / X['fnlwgt'].sum()
+
+# Calculate weights based on 'gender' column
+gender_counts = X['gender'].value_counts()
+total_samples = len(X)
+weights_gender = total_samples / (2 * gender_counts)
+
+weights_combined = []
+
+for index, row in X.iterrows():
+    if row['gender'] == 0:
+        weight = weights_fnlwgt[index] * weights_gender[0]
+    elif row['gender'] == 1:
+        weight = weights_fnlwgt[index] * weights_gender[1]
+    weights_combined.append(weight)
+
+weights_combined = pd.DataFrame(weights_combined, columns=['weights'])
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
 
 smote = SMOTE()
-X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+X_resampled, y_resampled = smote.fit_resample(X, y)
+sample_weights_resampled, _ = smote.fit_resample(weights_combined, y)
 
-# Load the pre-trained model
-pickle_in = open("E:\VSCode_workshop\python_workshop\HackStory\model.pkl", "rb")
-model = pickle.load(pickle_in)
+X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.2, random_state=42)
+sample_weights_train, sample_weights_test = train_test_split(sample_weights_resampled, test_size=0.2, random_state=42)
+
+model = RandomForestClassifier(class_weight = 'balanced')
+model.fit(X_train, y_train, sample_weight=sample_weights_train.values.ravel())
+
+y_pred = model.predict(X_test)
+
+accuracy = accuracy_score(y_test, y_pred)
+print(f'\nAccuracy: {accuracy * 100:.4f}%')
 
 classes = {0:'Income lower than 50k', 1:'Income greater than or equal to 50K'}
 
 class_labels = list(classes.values())
 
-st.title('Income Range Predictor')
+test_input = {
+    'age': [43],
+    'workclass': [3],
+    'fnlwgt': [1],
+    'education': [15],
+    'educational-num': [13.0],
+    'marital-status': [2],
+    'occupation': [11],
+    'relationship': [0],
+    'gender': [1],
+    'hours-per-week': [45],
+    'native-country': [38]
+}
 
-st.markdown('This is the user interface of an ML model of a machine learning algorithm to predict job applicants income range based on their demographic and professional information.')
-st.markdown('Please enter your details')
+# Test input dictionary to a DataFrame
+test_df = pd.DataFrame(test_input)  # Test input to be replaced with user input
 
-def predict_income(age, workclass, fnlwgt, education, marital_status, occupation,
-                   relationship, race, gender, hours_per_week, native_country):
-    input_data = pd.DataFrame({
-        'age': [age],
-        'workclass': [workclass],
-        'fnlwgt': [fnlwgt],
-        'education': [education],
-        'marital-status': [marital_status],
-        'occupation': [occupation],
-        'relationship': [relationship],
-        'race': [race],
-        'gender': [gender],
-        'hours-per-week': [hours_per_week],
-        'native-country': [native_country],
-    })  
-    # Encode the input data
-    input_encoded = input_data.apply(label_encoder.transform)
+predicted_income = model.predict(test_df)
 
-    # Make prediction
-    prediction = model.predict(input_encoded)
-    prediction_proba = model.predict_proba(input_encoded)
-    print(prediction)
-    return prediction[0], prediction_proba[0]
+if predicted_income == [0]:
+    print("\nIncome range for test input: <=50k")
+elif predicted_income == [1]:
+    print("\nIncome range for test input: >50k")
 
-def main():
-    age = st.number_input('Age', min_value=0, max_value=100)
-    workclass = st.selectbox('Workclass', X['workclass'].unique())
-    education = st.selectbox('Education', X['education'].unique())
-    marital_status = st.selectbox('Marital Status', X['marital-status'].unique())
-    occupation = st.selectbox('Occupation', X['occupation'].unique())
-    relationship = st.selectbox('Relationship', X['relationship'].unique())
-    race = st.selectbox('Race', X['race'].unique())
-    gender = st.selectbox('Gender', X['gender'].unique())
-    hours_per_week = st.number_input('Hours per Week', min_value=1, max_value=100)
-    native_country = st.selectbox('Native Country', X['native-country'].unique())
-
-    if st.button('Predict'):
-        prediction, prediction_proba = predict_income(age, workclass, education, marital_status, occupation, relationship, race, 
-                                                      gender, hours_per_week, native_country) #?
-
-        # Display the prediction
-        st.header('Prediction')
-        st.write(f'Income class: {prediction}')
-        st.write('Prediction probabilities:')
-        st.write(prediction_proba)
-
-if __name__ == '__main__':
-    main()
+filename = "trained_model.sav"
+pickle.dump(model, open(filename, 'wb'))
